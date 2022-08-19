@@ -1,3 +1,278 @@
+### Version 2.2.1
+ - Added support for `supportedScanType` in `Html5QrcodeScanner`. This feature
+    was implemented by our latest contributor - [mohsinaav@](https://github.com/mohsinaav)
+  
+   Now users can decide to only use camera based scan or file based scan or use
+   them in different order. How to use:
+
+
+   ```js
+    function onScanSuccess(decodedText, decodedResult) {
+        // handle the scanned code as you like, for example:
+        console.log(`Code matched = ${decodedText}`, decodedResult);
+    }
+
+    let config = {
+        fps: 10,
+        qrbox: {width: 100, height: 100},
+        rememberLastUsedCamera: true,
+        // Only support camera scan type.
+        supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA]
+    };
+
+    let html5QrcodeScanner = new Html5QrcodeScanner(
+        "reader", config, /* verbose= */ false);
+    html5QrcodeScanner.render(onScanSuccess);
+   ```
+
+   For file based scan only choose:
+   ```js
+   supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_FILE]
+   ```
+
+   For supporting both as it is today, you can ignore this field or set as:
+   ```js
+   supportedScanTypes: [
+       Html5QrcodeScanType.SCAN_TYPE_CAMERA,
+        Html5QrcodeScanType.SCAN_TYPE_FILE]
+   ```
+
+   To set the file based scan as defult change the order:
+   ```js
+      supportedScanTypes: [
+        Html5QrcodeScanType.SCAN_TYPE_FILE,
+        Html5QrcodeScanType.SCAN_TYPE_CAMERA]
+   ```
+
+### Version 2.2.0
+-   `config.qrbox` now supports consuming function of type
+
+    ```ts
+    /**
+     * A function that takes in the width and height of the video stream 
+    * and returns QrDimensions.
+    * 
+    * Viewfinder refers to the video showing camera stream.
+    */
+    export type QrDimensionFunction =
+        (viewfinderWidth: number, viewfinderHeight: number) => QrDimensions;
+    ```
+
+    This will allow developers to define custom QR box dimensions for their
+    implementations.
+
+    Example:
+    ```js
+    function onScanSuccess(decodedText, decodedResult) {
+        // handle the scanned code as you like, for example:
+        console.log(`Code matched = ${decodedText}`, decodedResult);
+    }
+
+    // Square QR box with edge size = 70% of the smaller edge of the viewfinder.
+    let qrboxFunction = function(viewfinderWidth, viewfinderHeight) {
+        let minEdgePercentage = 0.7; // 70%
+        let minEdgeSize = Math.min(viewfinderWidth, viewfinderHeight);
+        let qrboxSize = Math.floor(minEdgeSize * minEdgePercentage);
+        return {
+            width: qrboxSize,
+            height: qrboxSize
+        };
+    }
+
+    let html5QrcodeScanner = new Html5QrcodeScanner(
+        "reader",
+        { fps: 10, qrbox: qrboxFunction },
+        /* verbose= */ false);
+    html5QrcodeScanner.render(onScanSuccess);
+    ```
+
+### Version 2.1.6
+-   Add `alt` information to info icon to improve accessibility.
+
+### Version 2.1.5
+
+-   Changed behavior from throwing error in case `qrbox.width` or `qrbox` is larger than the width of the root element. In such cases the dimension will automatically be truncated to the size of root element and will throw a warning based on verbosity settings. This should address [issue#357](https://github.com/mebjas/html5-qrcode/issues/357)
+-   If `qrbox` is not set in config for either `Html5QrcodeScanner` or `Html5Qrcode` the scanning box will default to the size of video stream. From UI perspective there will be no shaded QR scanning box visible to user. This should resolve [Issue#343](https://github.com/mebjas/html5-qrcode/issues/343).
+-   Calling `Html5QrcodeScanner#clear()` will also clear the UI rendered due to image based scan. This should address [issue#193](https://github.com/mebjas/html5-qrcode/issues/193)
+
+### Version 2.1.4
+
+#### Huge thanks to [Ben Richardson](https://github.com/ben-gy) for one time sponsorship!!
+This is helpful in keeping the project in shape! Cheers to you!!
+
+[See sponsorship dashboard](https://github.com/sponsors/mebjas)
+
+### Changelog
+-   Fix bug in `stop()` method in `Html5Qrcode` class.
+-   Fix a minor UI error, where error message shown due to a certain camera not working, is not hidden when a functional camera is selected.
+-   [Feature Request#356](https://github.com/mebjas/html5-qrcode/issues/356) - Freeze the image (not clear) on success.
+
+Now calling `html5qrcode.pause(/* shouldPauseVideo */ true)` or `html5qrcodeScanner.pause(/* shouldPauseVideo */ true)` will freeze the viewfinder and calling corresponding `resume()` will unfreeze the viewfinder. Calling with `false` or no argument will just pause scanning without effecting the viewfinder.
+
+### Version 2.1.3
+-   Reduce the assets size using SVG instead of GIF files.
+
+### Version 2.1.2
+-   If there is only one camera detected, automatically use that.
+-   Cosmetic fixes: show `Launching Camera...` in button when launching the camera.
+
+### Version 2.1.1
+-   Fixed dashboard section exceeding the parent HTML element width.
+-   Added support for following beta APIs which allows modifying running video
+    stream state, which camera stream is running.
+    ```js
+    /**
+     * Returns the capabilities of the running video track.
+     * 
+     * Note: Should only be called if {@code Html5QrcodeScanner#getState()}
+     *   returns {@code Html5QrcodeScannerState#SCANNING} or 
+     *   {@code Html5QrcodeScannerState#PAUSED}.
+     *
+     * @beta This is an experimental API
+     * @returns the capabilities of a running video track.
+     * @throws error if the scanning is not in running state.
+     */
+    public getRunningTrackCapabilities(): MediaTrackCapabilities;
+
+    /**
+     * Apply a video constraints on running video track from camera.
+     *
+     * Note: Should only be called if {@code Html5QrcodeScanner#getState()}
+     *   returns {@code Html5QrcodeScannerState#SCANNING} or 
+     *   {@code Html5QrcodeScannerState#PAUSED}.
+     *
+     * @beta This is an experimental API
+     * @param {MediaTrackConstraints} specifies a variety of video or camera
+     *  controls as defined in
+     *  https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackConstraints
+     * @returns a Promise which succeeds if the passed constraints are applied,
+     *  fails otherwise.
+     * @throws error if the scanning is not in running state.
+     */
+    public applyVideoConstraints(videoConstaints: MediaTrackConstraints)   
+    ```
+
+    **Important note**: Both these APIs are beta and not publicly documented.
+
+-   Support for pausing and resuming code scanning in camera scan mode. New APIs
+    are added to both `Html5QrcodeScanner` and `Html5Qrcode`. They should only be called when the scanner state is `Html5QrcodeScannerState#SCANNING` (== `2`) or
+    `Html5QrcodeScannerState#PAUSED` (== `3`).
+    
+    APIs added:
+    ```js
+    /**
+     * Pauses the ongoing scan.
+     * 
+     * Note: this will not stop the viewfinder, but stop decoding camera stream.
+     * 
+     * @throws error if method is called when scanner is not in scanning state.
+     */
+    public pause();
+
+    /**
+     * Resumes the paused scan.
+     * 
+     * Note: with this caller will start getting results in success and error
+     * callbacks.
+     * 
+     * @throws error if method is called when scanner is not in paused state.
+     */
+    public resume();
+
+        /**
+     * Gets state of the camera scan.
+     *
+     * @returns state of type {@enum ScannerState}.
+     */
+    public getState(): Html5QrcodeScannerState;
+    ```
+
+    Example usage:
+
+    ```js
+    let html5QrcodeScanner = new Html5QrcodeScanner(
+        "reader", 
+        { 
+            fps: 10,
+            qrbox: {width: 250, height: 250},
+            rememberLastUsedCamera: true,
+            aspectRatio: 1.7777778
+        });
+
+    function onScanSuccess(decodedText, decodedResult) {
+        if (html5QrcodeScanner.getState() 
+            !== Html5QrcodeScannerState.NOT_STARTED) {
+            // Add this check to ensure success callback is not being called
+            // from file based scanner.
+
+            // Pause on scan result
+            html5QrcodeScanner.pause();
+        }
+
+
+        // Handle your business logic
+        // ...
+
+        // .. ok to resume now or elsewhere.
+        // just call html5QrcodeScanner.resume();
+        // Make sure to check if the state is !== NOT_STARTED
+    }
+	html5QrcodeScanner.render(onScanSuccess);
+    ```
+
+    Note: when camera scan is paused it adds a UI element indicating that state.
+
+### Version 2.1.0
+-   `[Fixed]` issues related to using with lodash - https://github.com/mebjas/html5-qrcode/issues/284
+-   `[Fixed]` Unable to use with typescript definition - https://github.com/mebjas/html5-qrcode/issues/283
+-   `[Fixed]` Not working with react - https://github.com/mebjas/html5-qrcode/issues/322
+-   `[Fixed]` TypeError: Html5QrcodeScanner is not a constructor - https://github.com/mebjas/html5-qrcode/issues/270
+-   `[Fixed]` TypeError: window._ is undefined - https://github.com/mebjas/html5-qrcode/issues/248
+
+### Version 2.0.13
+Added ability to set custom width and height to the scanner with `config.qrbox` argument.
+
+Now we can pass `config.qrbox` argument as instance of interface `QrDimensions`.
+
+```js
+function onScanSuccess(decodedText, decodedResult) { /* handle success. */ }
+function onScanFailure(error) { /* handle failure. */ }
+
+let config = { fps: 10, qrbox: { width: 250, height: 250 } };
+
+let html5QrcodeScanner = new Html5QrcodeScanner(
+    "reader", config , /* verbose= */ false);
+html5QrcodeScanner.render(onScanSuccess, onScanFailure);
+```
+
+For a rectangular QR Scanning box we can set it to something like:
+```js
+// .. rest of the code
+let config = { fps: 10, qrbox: { width: 400, height: 150 } };
+
+let html5QrcodeScanner = new Html5QrcodeScanner(
+    "reader", config , /* verbose= */ false);
+html5QrcodeScanner.render(onScanSuccess, onScanFailure);
+```
+
+### Version 2.0.12
+-   Redundant information in the top status bar removed.
+-   Added support for remembering permission and last camera used. This feature is on by default. Can be turned on or off using `rememberLastUsedCamera` flag in `Html5QrcodeScannerConfig`. How to explicitly enable it:
+    ```js
+      function onScanSuccess(decodedText, decodedResult) {
+          // handle success.
+      }
+      let html5QrcodeScanner = new Html5QrcodeScanner(
+        "reader", 
+        { 
+            fps: 10,
+            qrbox: 250,
+            rememberLastUsedCamera: true
+            // ^ set this to false to disable this.
+        });
+      html5QrcodeScanner.render(onScanSuccess);
+      ```
+
 ### Version 2.0.11
  -    Add support for native [BarcodeDetector](https://web.dev/shape-detection/#barcodedetector) based scanning.
       - On Chrome `ZXing` based decoder takes `20-25` ms on my Mac book pro 16.

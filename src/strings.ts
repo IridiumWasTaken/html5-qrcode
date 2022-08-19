@@ -86,12 +86,20 @@ export class Html5QrcodeScannerStrings {
         return "Requesting camera permissions...";
     }
 
+    public static noCameraFound(): string {
+        return "No camera found";
+    }
+
     public static scanButtonStopScanningText(): string {
         return "Stop Scanning";
     }
 
     public static scanButtonStartScanningText(): string {
         return "Start Scanning";
+    }
+
+    public static scanButtonScanningStarting(): string {
+        return "Launching Camera...";
     }
 
     /**
@@ -110,5 +118,21 @@ export class Html5QrcodeScannerStrings {
      */
     public static textIfFileScanSelected(): string {
         return "Scan using camera directly";
+    }
+
+    public static selectCamera(): string {
+        return "Select Camera";
+    }
+}
+
+/** Strings used in {@class LibraryInfoDiv} */
+export class LibraryInfoStrings {
+
+    public static builtUsing(): string {
+        return "Built using ";
+    }
+
+    public static reportIssues(): string {
+        return "Report issues";
     }
 }

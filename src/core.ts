@@ -86,16 +86,33 @@ export class Html5QrcodeConstants {
         = "https://github.com/mebjas/html5-qrcode";
     static SCAN_DEFAULT_FPS = 2;
     static DEFAULT_DISABLE_FLIP = false;
+    static DEFAULT_REMEMBER_LAST_CAMERA_USED = true;
+    static DEFAULT_SUPPORTED_SCAN_TYPE = [
+        Html5QrcodeScanType.SCAN_TYPE_CAMERA,
+        Html5QrcodeScanType.SCAN_TYPE_FILE];
 }
+
+/** Defines dimension for QR Code Scanner. */
+export interface QrDimensions {
+    width: number;
+    height: number;
+}
+
+/**
+ * A function that takes in the width and height of the video stream 
+ * and returns QrDimensions.
+ * 
+ * Viewfinder refers to the video showing camera stream.
+ */
+export type QrDimensionFunction =
+    (viewfinderWidth: number, viewfinderHeight: number) => QrDimensions;
 
 /**
  * Defines bounds of detected QR code w.r.t the scan region.
  */
-export interface QrBounds {
+export interface QrBounds extends QrDimensions {
     x: number;
     y: number;
-    width: number;
-    height: number;
 }
 
 /** Format of detected code. */

@@ -25,7 +25,9 @@ import {
     isValidHtml5QrcodeSupportedFormats,
     Html5QrcodeConstants,
     Html5QrcodeResult,
-    isNullOrUndefined
+    isNullOrUndefined,
+    QrDimensions,
+    QrDimensionFunction
 } from "./core";
 
 import { Html5QrcodeStrings } from "./strings";
@@ -35,6 +37,12 @@ import {
     ExperimentalFeaturesConfig,
     ExperimentalFeaturesConfigFactory
 } from "./experimental-features";
+import {
+    StateManagerProxy,
+    StateManagerFactory,
+    StateManagerTransaction,
+    Html5QrcodeScannerState
+} from "./state-manager";
 
 type Html5QrcodeIdentifier = string | MediaTrackConstraints;
 
@@ -48,7 +56,7 @@ class Constants extends Html5QrcodeConstants {
     static SHADED_RIGHT = 2;
     static SHADED_TOP = 3;
     static SHADED_BOTTOM = 4;
-    static SHADED_REGION_CLASSNAME = "qr-shaded-region";
+    static SHADED_REGION_ELEMENT_ID = "qr-shaded-region";
     static VERBOSE = false;
     static BORDER_SHADER_DEFAULT_COLOR = "#ffffff";
     static BORDER_SHADER_MATCH_COLOR = "rgb(90, 193, 56)";
@@ -104,8 +112,11 @@ export interface Html5QrcodeCameraScanConfig {
     fps: number | undefined;
 
     /**
-     * Optional, width of QR scanning box, this should be smaller than the width
-     * and height of the box. This would make the scanner look like this:
+     * Optional, edge size, dimension or calculator function for QR scanning
+     * box, the value or computed value should be smaller than the width and
+     * height of the full region.
+     * 
+     * This would make the scanner look like this:
      *          ----------------------
      *          |********************|
      *          |******,,,,,,,,,*****|      <--- shaded region
@@ -115,8 +126,16 @@ export interface Html5QrcodeCameraScanConfig {
      *          |********************|
      *          |********************|
      *          ----------------------
+     * 
+     * Instance of {@interface QrDimensions} can be passed to construct a non
+     * square rendering of scanner box. You can also pass in a function of type
+     * {@type QrDimensionFunction} that takes in the width and height of the
+     * video stream and return QR box size of type {@interface QrDimensions}.
+     * 
+     * If this value is not set, no shaded QR box will be rendered and the
+     * scanner will scan the entire area of video stream.
      */
-    qrbox?: number | undefined;
+    qrbox?: number | QrDimensions | QrDimensionFunction | undefined;
 
     /**
      * Optional, Desired aspect ratio for the video feed. Ideal aspect ratios
@@ -150,12 +169,12 @@ export interface Html5QrcodeCameraScanConfig {
  * Internal implementation of {@interface Html5QrcodeConfig} with util & factory
  * methods.
  */
-class InternalHtml5QrcodeConfig implements InternalHtml5QrcodeConfig {
+class InternalHtml5QrcodeConfig implements Html5QrcodeCameraScanConfig {
 
     // TODO(mebjas) Make items that doesn't need to be public private.
     public fps: number;
     public disableFlip: boolean;
-    public qrbox: number | undefined;
+    public qrbox: number | QrDimensions | QrDimensionFunction | undefined;
     public aspectRatio: number | undefined;
     public videoConstraints: MediaTrackConstraints | undefined;
 
@@ -228,6 +247,7 @@ export class Html5Qrcode {
     // error prone nature of a large stateful class.
     private element: HTMLElement | null = null;
     private canvasElement: HTMLCanvasElement | null = null;
+    private scannerPausedUiElement: HTMLDivElement | null = null;
     private hasBorderShaders: boolean | null = null;
     private borderShaders: Array<HTMLElement> | null = null;
     private qrMatch: boolean | null = null;
@@ -239,7 +259,10 @@ export class Html5Qrcode {
     private lastScanImageFile: string | null = null;
     //#endregion
 
-    public isScanning: boolean;
+    public stateManagerProxy: StateManagerProxy;
+
+    // TODO(mebjas): deprecate this.
+    public isScanning: boolean = false;
 
     /**
      * Initialize the code scanner.
@@ -257,7 +280,7 @@ export class Html5Qrcode {
      * TODO(mebjas): Deprecate the verbosity boolean flag completely.
      */
     public constructor(elementId: string, 
-        configOrVerbosityFlag: boolean | Html5QrcodeFullConfig | undefined) {
+        configOrVerbosityFlag?: boolean | Html5QrcodeFullConfig | undefined) {
         if (!document.getElementById(elementId)) {
             throw `HTML Element with id=${elementId} not found`;
         }
@@ -284,8 +307,7 @@ export class Html5Qrcode {
         this.foreverScanTimeout;
         this.localMediaStream;
         this.shouldScan = true;
-        this.isScanning = false;
-
+        this.stateManagerProxy = StateManagerFactory.create();
     }
 
     //#region start()
@@ -346,33 +368,22 @@ export class Html5Qrcode {
         // qr shaded box
         const isShadedBoxEnabled = internalConfig.isShadedBoxEnabled();
         const element = document.getElementById(this.elementId)!;
-        const width = element.clientWidth
+        const rootElementWidth = element.clientWidth
             ? element.clientWidth : Constants.DEFAULT_WIDTH;
         element.style.position = "relative";
 
         this.shouldScan = true;
         this.element = element;
 
-        // Validate before insertion
-        if (isShadedBoxEnabled) {
-            const qrboxSize = internalConfig.qrbox!;
-            if (qrboxSize < Constants.MIN_QR_BOX_SIZE) {
-                throw "minimum size of 'config.qrbox' is"
-                + ` ${Constants.MIN_QR_BOX_SIZE}px.`;
-            }
-
-            if (qrboxSize > width) {
-                throw "'config.qrbox' should not be greater than the "
-                + "width of the HTML element.";
-            }
-        }
-
         const $this = this;
+        const toScanningStateChangeTransaction: StateManagerTransaction
+            = this.stateManagerProxy.startTransition(Html5QrcodeScannerState.SCANNING);
         return new Promise((resolve, reject) => {
             const videoConstraints = areVideoConstraintsEnabled
                     ? internalConfig.videoConstraints
                     : $this.createVideoConstraints(cameraIdOrConfig);
             if (!videoConstraints) {
+                toScanningStateChangeTransaction.cancel();
                 reject("videoConstraints should be defined");
                 return;
             }
@@ -388,55 +399,109 @@ export class Html5Qrcode {
                             stream,
                             internalConfig,
                             areVideoConstraintsEnabled,
-                            width,
+                            rootElementWidth,
                             qrCodeSuccessCallback,
                             qrCodeErrorCallback!)
                             .then((_) => {
+                                toScanningStateChangeTransaction.execute();
                                 $this.isScanning = true;
                                 resolve(/* Void */ null);
-                            })
-                            .catch(reject);
-                    })
-                    .catch((error) => {
-                        reject(Html5QrcodeStrings.errorGettingUserMedia(error));
-                    });
-            } else if (navigator.getUserMedia) {
-                if (typeof cameraIdOrConfig != "string") {
-                    // TODO(mebjas): Make errors more concrete and categorizable.
-                    throw Html5QrcodeStrings.onlyDeviceSupportedError();
-                }
-                const getCameraConfig: MediaStreamConstraints = {
-                    video: videoConstraints
-                };
-                navigator.getUserMedia(getCameraConfig,
-                    (stream) => {
-                        $this.onMediaStreamReceived(
-                            stream,
-                            internalConfig,
-                            areVideoConstraintsEnabled,
-                            width,
-                            qrCodeSuccessCallback,
-                            qrCodeErrorCallback!)
-                            .then((_) => {
-                                $this.isScanning = true;
-                                resolve(/* Void */ null);
-
                             })
                             .catch((error) => {
-                                reject(
-                                    Html5QrcodeStrings.errorGettingUserMedia(
-                                        error));
-
+                                toScanningStateChangeTransaction.cancel();
+                                reject(error);
                             });
-                    }, (error) => {
+                    })
+                    .catch((error) => {
+                        toScanningStateChangeTransaction.cancel();
                         reject(Html5QrcodeStrings.errorGettingUserMedia(error));
                     });
             } else {
+                toScanningStateChangeTransaction.cancel();
                 reject(Html5QrcodeStrings.cameraStreamingNotSupported());
             }
         });
     }
     //#endregion
+
+    //#region Other state related public APIs
+    /**
+     * Pauses the ongoing scan.
+     * 
+     * @param shouldPauseVideo (Optional, default = false) If {@code true} the
+     * video will be paused.
+     * 
+     * @throws error if method is called when scanner is not in scanning state.
+     */
+    public pause(shouldPauseVideo?: boolean) {
+        if (!this.stateManagerProxy.isStrictlyScanning()) {
+            throw "Cannot pause, scanner is not scanning.";
+        }
+        this.stateManagerProxy.directTransition(Html5QrcodeScannerState.PAUSED);
+        this.showPausedState();
+
+        if (isNullOrUndefined(shouldPauseVideo) || shouldPauseVideo !== true) {
+            shouldPauseVideo = false;
+        }
+
+        if (shouldPauseVideo && this.videoElement) {
+            this.videoElement.pause();
+        }
+    }
+
+    /**
+     * Resumes the paused scan.
+     * 
+     * If the video was previously paused by setting {@code shouldPauseVideo}
+     * to {@code true} in {@link Html5Qrcode#pause(shouldPauseVideo)}, calling
+     * this method will resume the video.
+     * 
+     * Note: with this caller will start getting results in success and error
+     * callbacks.
+     * 
+     * @throws error if method is called when scanner is not in paused state.
+     */
+    public resume() {
+        if (!this.stateManagerProxy.isPaused()) {
+            throw "Cannot result, scanner is not paused.";
+        }
+
+        if (!this.videoElement) {
+            throw "VideoElement doesn't exist while trying resume()";
+        }
+
+        const $this = this;
+        const transitionToScanning = () => {
+            $this.stateManagerProxy.directTransition(
+                Html5QrcodeScannerState.SCANNING);
+            $this.hidePausedState();
+        }
+
+        let isVideoPaused = this.videoElement.paused;
+        if (!isVideoPaused) {
+            transitionToScanning();
+            return;
+        }
+
+        // Transition state, when the video playback has resumed
+        // in case it was paused.
+        const onVideoResume = () => {
+            // Transition after 300ms to avoid the previous canvas frame being rescanned.
+            setTimeout(transitionToScanning, 200);
+            $this.videoElement?.removeEventListener("playing", onVideoResume);
+        }
+        this.videoElement.addEventListener("playing", onVideoResume);
+        this.videoElement.play();
+    }
+
+    /**
+     * Gets state of the camera scan.
+     *
+     * @returns state of type {@enum ScannerState}.
+     */
+    public getState(): Html5QrcodeScannerState {
+        return this.stateManagerProxy.getState();
+    }
 
     /**
      * Stops streaming QR Code video and scanning.
@@ -444,7 +509,14 @@ export class Html5Qrcode {
      * @returns Promise for safely closing the video stream.
      */
     public stop(): Promise<void> {
-        // TODO(mebjas): fail fast if the start() wasn't called.
+        if (!this.stateManagerProxy.isScanning()) {
+            throw "Cannot stop, scanner is not running or paused.";
+        }
+
+        const toStoppedStateTransaction: StateManagerTransaction
+            = this.stateManagerProxy.startTransition(
+                Html5QrcodeScannerState.NOT_STARTED);
+
         this.shouldScan = false;
         if (this.foreverScanTimeout) {
             clearTimeout(this.foreverScanTimeout);
@@ -455,13 +527,11 @@ export class Html5Qrcode {
             if (!this.element) {
                 return;
             }
-            while (this.element.getElementsByClassName(
-                Constants.SHADED_REGION_CLASSNAME).length) {
-                const shadedChild = this.element.getElementsByClassName(
-                    Constants.SHADED_REGION_CLASSNAME)[0];
-                this.element.removeChild(shadedChild);
+            let childElement = document.getElementById(Constants.SHADED_REGION_ELEMENT_ID);
+            if (childElement) {
+                this.element.removeChild(childElement);
             }
-        };
+         };
 
         return new Promise((resolve, _) => {
             const onAllTracksClosed = () => {
@@ -472,13 +542,16 @@ export class Html5Qrcode {
                 }
 
                 removeQrRegion();
-                this.isScanning = false;
                 if (this.qrRegion) {
                     this.qrRegion = null;
                 }
                 if (this.context) {
                     this.context = null;
                 }
+
+                toStoppedStateTransaction.execute();
+                this.hidePausedState();
+                this.isScanning = false;
                 resolve();
             };
 
@@ -501,7 +574,9 @@ export class Html5Qrcode {
             });
         });
     }
+    //#endregion
 
+    //#region File scan related public APIs
     /**
      * Scans an Image File for QR Code.
      *
@@ -552,8 +627,8 @@ export class Html5Qrcode {
             showImage = true;
         }
 
-        if (this.isScanning) {
-            throw "Close ongoing scan before scanning a file.";
+        if (!this.stateManagerProxy.canScanFile()) {
+            throw "Cannot start file scan - ongoing camera scan";
         }
 
         return new Promise((resolve, reject) => {
@@ -639,6 +714,7 @@ export class Html5Qrcode {
             inputImage.src = URL.createObjectURL(imageFile);
         });
     }
+    //#endregion
 
     /**
      * Clears the existing canvas.
@@ -656,14 +732,14 @@ export class Html5Qrcode {
      * @returns a Promise with list of {@code CameraDevice}.
      */
     public static getCameras(): Promise<Array<CameraDevice>> {
-        if (navigator.mediaDevices) {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
             return Html5Qrcode.getCamerasFromMediaDevices();
         }
         
         // Using deprecated api to support really old browsers.
         var mst = <any>MediaStreamTrack;
         if (MediaStreamTrack && mst.getSources) {
-            return Html5Qrcode.getCamerasFrmoMediaStreamTrack();
+            return Html5Qrcode.getCamerasFromMediaStreamTrack();
         }
 
         // This can potentially happen if the page is loaded without SSL.
@@ -689,7 +765,7 @@ export class Html5Qrcode {
      * @returns the capabilities of a running video track.
      * @throws error if the scanning is not in running state.
      */
-    public getRunningTrackCapabilities() {
+    public getRunningTrackCapabilities(): MediaTrackCapabilities {
         if (this.localMediaStream == null) {
             throw "Scanning is not in running state, call this API only when"
                 + " QR code scanning using camera is in running state.";
@@ -796,7 +872,7 @@ export class Html5Qrcode {
         });
     }
 
-    private static getCamerasFrmoMediaStreamTrack(): Promise<Array<CameraDevice>> {
+    private static getCamerasFromMediaStreamTrack(): Promise<Array<CameraDevice>> {
         return new Promise((resolve, _) => {
             const callback = (sourceInfos: Array<any>) => {
                 const results = [];
@@ -890,33 +966,141 @@ export class Html5Qrcode {
 
     }
 
+    /**
+     * Validates if the passed config for qrbox is correct.
+     */
+    private validateQrboxSize(
+        viewfinderWidth: number,
+        viewfinderHeight: number,
+        internalConfig: InternalHtml5QrcodeConfig) {
+        const qrboxSize = internalConfig.qrbox!;
+        this.validateQrboxConfig(qrboxSize);
+        let qrDimensions = this.toQrdimensions(
+            viewfinderWidth, viewfinderHeight, qrboxSize);
+
+        const validateMinSize = (size: number) => {
+            if (size < Constants.MIN_QR_BOX_SIZE) {
+                throw "minimum size of 'config.qrbox' dimension value is"
+                    + ` ${Constants.MIN_QR_BOX_SIZE}px.`;
+            }
+        };
+
+        /**
+         * The 'config.qrbox.width' shall be overriden if it's larger than the
+         * width of the root element.
+         * 
+         * Based on the verbosity settings, this will be logged to the logger.
+         * 
+         * @param configWidth the width of qrbox set by users in the config.
+         */
+        const correctWidthBasedOnRootElementSize = (configWidth: number) => {
+            if (configWidth > viewfinderWidth) {
+                this.logger.warn("`qrbox.width` or `qrbox` is larger than the"
+                    + " width of the root element. The width will be truncated"
+                    + " to the width of root element.");
+                configWidth = viewfinderWidth;
+            }
+            return configWidth;
+        };
+
+        validateMinSize(qrDimensions.width);
+        validateMinSize(qrDimensions.height);
+        qrDimensions.width = correctWidthBasedOnRootElementSize(
+            qrDimensions.width);
+        // Note: In this case if the height of the qrboxSize turns out to be
+        // greater than the height of the root element (which should later be
+        // based on the aspect ratio of the camera stream), it would be silently
+        // ignored with a warning.
+    }
+
+    /**
+     * Validates if the {@param qrboxSize} is a valid value.
+     * 
+     * It's expected to be either a number or of type {@interface QrDimensions}.
+     */
+    private validateQrboxConfig(
+        qrboxSize: number | QrDimensions | QrDimensionFunction) {
+        if (typeof qrboxSize === "number") {
+            return;
+        }
+
+        if (typeof qrboxSize === "function") {
+            // This is a valid format.
+            return;
+        }
+
+        // Alternatively, the config is expected to be of type QrDimensions.
+        if (qrboxSize.width === undefined || qrboxSize.height === undefined) {
+            throw "Invalid instance of QrDimensions passed for "
+                + "'config.qrbox'. Both 'width' and 'height' should be set.";
+        }
+    }
+
+    /**
+     * Possibly converts {@param qrboxSize} to an object of type
+     * {@interface QrDimensions}.
+     */
+    private toQrdimensions(
+        viewfinderWidth: number,
+        viewfinderHeight: number,
+        qrboxSize: number | QrDimensions | QrDimensionFunction): QrDimensions {
+        if (typeof qrboxSize === "number") {
+            return { width: qrboxSize, height: qrboxSize};
+        } else if (typeof qrboxSize === "function") {
+            try {
+                return qrboxSize(viewfinderWidth, viewfinderHeight);
+            } catch (error) {
+                throw new Error(
+                    "qrbox config was passed as a function but it failed with "
+                    + "unknown error" + error);
+            }
+        }
+        return qrboxSize;
+    }
+
     //#region Documented private methods for camera based scanner.
     /**
     * Setups the UI elements, changes the state of this class.
     *
-    * @param width derived width of viewfinder.
-    * @param height derived height of viewfinder.
+    * @param viewfinderWidth derived width of viewfinder.
+    * @param viewfinderHeight derived height of viewfinder.
     */
     private setupUi(
-        width: number,
-        height: number,
+        viewfinderWidth: number,
+        viewfinderHeight: number,
         internalConfig: InternalHtml5QrcodeConfig): void {
-        const qrboxSize = internalConfig.qrbox!;
-        if (qrboxSize > height) {
-            this.logger.warn("[Html5Qrcode] config.qrboxsize is greater "
-                + "than video height. Shading will be ignored");
+
+        // Validate before insertion
+        if (internalConfig.isShadedBoxEnabled()) {
+            this.validateQrboxSize(
+                viewfinderWidth, viewfinderHeight, internalConfig);
+        }
+
+        // If `qrbox` size is not set, it will default to the dimensions of the
+        // viewfinder.
+        const qrboxSize = isNullOrUndefined(internalConfig.qrbox) ? 
+            {width: viewfinderWidth, height: viewfinderHeight}: internalConfig.qrbox!;
+
+        this.validateQrboxConfig(qrboxSize);
+        let qrDimensions = this.toQrdimensions(viewfinderWidth, viewfinderHeight, qrboxSize);
+        if (qrDimensions.height > viewfinderHeight) {
+            this.logger.warn("[Html5Qrcode] config.qrbox has height that is"
+                + "greater than the height of the video stream. Shading will be"
+                + " ignored");
         }
  
         const shouldShadingBeApplied
-            = internalConfig.isShadedBoxEnabled() && qrboxSize <= height;
+            = internalConfig.isShadedBoxEnabled()
+                && qrDimensions.height <= viewfinderHeight;
         const defaultQrRegion: QrcodeRegionBounds = {
             x: 0,
             y: 0,
-            width: width,
-            height: height
+            width: viewfinderWidth,
+            height: viewfinderHeight
         };
+
         const qrRegion = shouldShadingBeApplied
-            ? this.getShadedRegionBounds(width, height, qrboxSize)
+            ? this.getShadedRegionBounds(viewfinderWidth, viewfinderHeight, qrDimensions)
             : defaultQrRegion;
  
         const canvasElement = this.createCanvasElement(
@@ -930,13 +1114,30 @@ export class Html5Qrcode {
         this.element!.append(canvasElement);
         if (shouldShadingBeApplied) {
             this.possiblyInsertShadingElement(
-                this.element!, width, height, qrboxSize);
+                this.element!, viewfinderWidth, viewfinderHeight, qrDimensions);
         }
+
+        this.createScannerPausedUiElement(this.element!);
  
         // Update local states
         this.qrRegion = qrRegion;
         this.context = context;
         this.canvasElement = canvasElement;
+    }
+
+    // TODO(mebjas): Convert this to a standard message viewer.
+    private createScannerPausedUiElement(rootElement: HTMLElement) {
+        const scannerPausedUiElement = document.createElement("div");
+        scannerPausedUiElement.innerText = "Scanner paused";
+        scannerPausedUiElement.style.display = "none";
+        scannerPausedUiElement.style.position = "absolute";
+        scannerPausedUiElement.style.top = "0px";
+        scannerPausedUiElement.style.zIndex = "1";
+        scannerPausedUiElement.style.background = "yellow";
+        scannerPausedUiElement.style.textAlign = "center";
+        scannerPausedUiElement.style.width = "100%";
+        rootElement.appendChild(scannerPausedUiElement);
+        this.scannerPausedUiElement = scannerPausedUiElement;
     }
  
      /**
@@ -951,6 +1152,10 @@ export class Html5Qrcode {
          qrCodeSuccessCallback: QrcodeSuccessCallback,
          qrCodeErrorCallback: QrcodeErrorCallback
      ): Promise<boolean> {
+        if (this.stateManagerProxy.isPaused()) {
+            return Promise.resolve(false);
+        }
+
         return this.qrcode.decodeAsync(this.canvasElement!)
         .then((result) => {
             qrCodeSuccessCallback(
@@ -1061,19 +1266,20 @@ export class Html5Qrcode {
                 // Attach listeners to video.
                 videoElement.onabort = reject;
                 videoElement.onerror = reject;
-                videoElement.onplaying = () => {
+
+                const onVideoStart = () => {
                     const videoWidth = videoElement.clientWidth;
                     const videoHeight = videoElement.clientHeight;
                     $this.setupUi(videoWidth, videoHeight, internalConfig);
-
                     // start scanning after video feed has started
                     $this.foreverScan(
                         internalConfig,
                         qrCodeSuccessCallback,
                         qrCodeErrorCallback);
+                    videoElement.removeEventListener("playing", onVideoStart);
                     resolve(/* void */ null);
                 }
-
+                videoElement.addEventListener("playing", onVideoStart);
                 videoElement.srcObject = mediaStream;
                 videoElement.play();
 
@@ -1243,7 +1449,7 @@ export class Html5Qrcode {
     //#endregion
 
     private clearElement(): void {
-        if (this.isScanning) {
+        if (this.stateManagerProxy.isScanning()) {
             throw "Cannot clear while scan is ongoing, close it first.";
         }
         const element = document.getElementById(this.elementId);
@@ -1299,17 +1505,18 @@ export class Html5Qrcode {
     }
 
     private getShadedRegionBounds(
-        width: number, height: number, qrboxSize: number): QrcodeRegionBounds {
-        if (qrboxSize > width || qrboxSize > height) {
-            throw "'config.qrbox' should not be greater than the "
-            + "width and height of the HTML element.";
+        width: number, height: number, qrboxSize: QrDimensions)
+        : QrcodeRegionBounds {
+        if (qrboxSize.width > width || qrboxSize.height > height) {
+            throw "'config.qrbox' dimensions should not be greater than the "
+            + "dimensions of the root HTML element.";
         }
 
         return {
-            x: (width - qrboxSize) / 2,
-            y: (height - qrboxSize) / 2,
-            width: qrboxSize,
-            height: qrboxSize
+            x: (width - qrboxSize.width) / 2,
+            y: (height - qrboxSize.height) / 2,
+            width: qrboxSize.width,
+            height: qrboxSize.height
         };
     }
 
@@ -1317,81 +1524,96 @@ export class Html5Qrcode {
         element: HTMLElement,
         width: number,
         height: number,
-        qrboxSize: number) {
-        if ((width - qrboxSize) < 1 || (height - qrboxSize) < 1) {
+        qrboxSize: QrDimensions) {
+        if ((width - qrboxSize.width) < 1 || (height - qrboxSize.height) < 1) {
           return;
         }
         const shadingElement = document.createElement("div");
         shadingElement.style.position = "absolute";
+
+        const rightLeftBorderSize = (width - qrboxSize.width) / 2;
+        const topBottomBorderSize = (height - qrboxSize.height) / 2;
+
         shadingElement.style.borderLeft
-            = `${(width-qrboxSize)/2}px solid #0000007a`;
+            = `${rightLeftBorderSize}px solid #0000007a`;
         shadingElement.style.borderRight
-            = `${(width-qrboxSize)/2}px solid #0000007a`;
+            = `${rightLeftBorderSize}px solid #0000007a`;
         shadingElement.style.borderTop
-            = `${(height-qrboxSize)/2}px solid #0000007a`;
+            = `${topBottomBorderSize}px solid #0000007a`;
         shadingElement.style.borderBottom
-            = `${(height-qrboxSize)/2}px solid #0000007a`;
+            = `${topBottomBorderSize}px solid #0000007a`;
         shadingElement.style.boxSizing = "border-box";
         shadingElement.style.top = "0px";
         shadingElement.style.bottom = "0px";
         shadingElement.style.left = "0px";
         shadingElement.style.right = "0px";
-        shadingElement.id = `${Constants.SHADED_REGION_CLASSNAME}`;
+        shadingElement.id = `${Constants.SHADED_REGION_ELEMENT_ID}`;
   
         // Check if div is too small for shadows. As there are two 5px width
         // borders the needs to have a size above 10px.
-        if ((width - qrboxSize) < 11 || (height - qrboxSize) < 11) {
+        if ((width - qrboxSize.width) < 11 
+            || (height - qrboxSize.height) < 11) {
           this.hasBorderShaders = false;
         } else {
-          const smallSize = 5;
-          const largeSize = 40;
-          this.insertShaderBorders(
-              shadingElement, largeSize, smallSize, -smallSize, 0, true);
-          this.insertShaderBorders(
-              shadingElement, largeSize, smallSize, -smallSize, 0, false);
-          this.insertShaderBorders(
-              shadingElement,
-              largeSize,
-              smallSize,
-              qrboxSize + smallSize,
-              0,
-              true);
-          this.insertShaderBorders(
-              shadingElement,
-              largeSize,
-              smallSize,
-              qrboxSize + smallSize,
-              0,
-              false);
-          this.insertShaderBorders(
-              shadingElement,
-              smallSize,
-              largeSize + smallSize,
-              -smallSize,
-              -smallSize,
-              true);
-          this.insertShaderBorders(
-              shadingElement,
-              smallSize,
-              largeSize + smallSize,
-              qrboxSize + smallSize - largeSize,
-              -smallSize,
-              true);
-          this.insertShaderBorders(
-              shadingElement,
-              smallSize,
-              largeSize + smallSize,
-              -smallSize,
-              -smallSize,
-              false);
-          this.insertShaderBorders(
-              shadingElement,
-              smallSize,
-              largeSize + smallSize,
-              qrboxSize + smallSize - largeSize,
-              -smallSize,
-              false);
-          this.hasBorderShaders = true;
+            const smallSize = 5;
+            const largeSize = 40;
+            this.insertShaderBorders(
+                shadingElement,
+                /* width= */ largeSize, 
+                /* height= */ smallSize,
+                /* top= */ -smallSize,
+                /* side= */ 0,
+                /* isLeft= */ true);
+            this.insertShaderBorders(
+                shadingElement,
+                /* width= */ largeSize,
+                /* height= */ smallSize,
+                /* top= */ -smallSize,
+                /* side= */ 0,
+                /* isLeft= */ false);
+            this.insertShaderBorders(
+                shadingElement,
+                /* width= */ largeSize,
+                /* height= */ smallSize,
+                /* top= */ qrboxSize.height + smallSize,
+                /* side= */ 0,
+                /* isLeft= */ true);
+            this.insertShaderBorders(
+                shadingElement,
+                /* width= */ largeSize,
+                /* height= */ smallSize,
+                /* top= */ qrboxSize.height + smallSize,
+                /* side= */ 0,
+                /* isLeft= */ false);
+            this.insertShaderBorders(
+                shadingElement,
+                /* width= */ smallSize,
+                /* height= */ largeSize + smallSize,
+                /* top= */ -smallSize,
+                /* side= */ -smallSize,
+                /* isLeft= */ true);
+            this.insertShaderBorders(
+                shadingElement,
+                /* width= */ smallSize,
+                /* height= */ largeSize + smallSize,
+                /* top= */ qrboxSize.height + smallSize - largeSize,
+                /* side= */ -smallSize,
+                /* isLeft= */ true);
+            this.insertShaderBorders(
+                shadingElement,
+                /* width= */ smallSize,
+                /* height= */ largeSize + smallSize,
+                /* top= */ -smallSize,
+                /* side= */ -smallSize,
+                /* isLeft= */ false);
+            this.insertShaderBorders(
+                shadingElement,
+                /* width= */ smallSize,
+                /* height= */ largeSize + smallSize,
+                /* top= */ qrboxSize.height + smallSize - largeSize,
+                /* side= */ -smallSize,
+                /* isLeft= */ false);
+            this.hasBorderShaders = true;
         }
         element.append(shadingElement);
     }
@@ -1419,6 +1641,20 @@ export class Html5Qrcode {
         }
         this.borderShaders.push(elem);
         shaderElem.appendChild(elem);
+    }
+
+    private showPausedState() {
+        if (!this.scannerPausedUiElement) {
+            throw "[internal error] scanner paused UI element not found";
+        }
+        this.scannerPausedUiElement.style.display = "block";
+    }
+
+    private hidePausedState() {
+        if (!this.scannerPausedUiElement) {
+            throw "[internal error] scanner paused UI element not found";
+        }
+        this.scannerPausedUiElement.style.display = "none";
     }
 
     private getTimeoutFps(fps: number) {
